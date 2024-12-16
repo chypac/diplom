@@ -27,6 +27,7 @@
     - logging: для ведения журнала
     - threading: для асинхронной работы
     - argparse: для обработки аргументов командной строки
+    - datetime: для работы с датой и временем
 
 Автор: [Агафонов Артём]
 Дата создания: 2024
@@ -40,13 +41,18 @@ import psutil
 import keyboard
 import threading
 from time import sleep
+from datetime import datetime
 
 # Настройка логирования
+log_dir = 'logs'
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, f'analyzer_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('anomaly_detection.log'),
+        logging.FileHandler(log_file, encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
