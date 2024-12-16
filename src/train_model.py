@@ -31,8 +31,13 @@ logger = logging.getLogger(__name__)
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 logger.info(f'Используется устройство: {device}')
 
-# Корневая директория с датасетами
-root_dir = r"C:\Users\agaar\PycharmProjects\pythonProject\diplom_2\dataset\archive (1)"
+# Изменяем путь к директории с данными и моделями
+root_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data')
+models_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'models')
+
+# Создаем директории, если они не существуют
+os.makedirs(root_dir, exist_ok=True)
+os.makedirs(models_dir, exist_ok=True)
 
 def log_memory_usage():
     """Логирование использования памяти"""
@@ -264,7 +269,7 @@ for folder in os.listdir(root_dir):
     if os.path.isdir(folder_path):
         logger.info(f'='*50)
         logger.info(f'Обработка папки: {folder}')
-        model_save_path = os.path.join(folder_path, 'autoencoder_model.pth')
+        model_save_path = os.path.join(models_dir, f'{folder}_autoencoder_model.pth')
         process_and_train(folder_path, model_save_path)
 
 logger.info('Обучение завершено для всех типов атак')

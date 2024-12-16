@@ -406,8 +406,12 @@ if __name__ == "__main__":
             except ValueError:
                 logger.error("Введите числовое значение.")
 
-        # Загрузка моделей из папок
-        models_dir = r"C:\Users\agaar\PycharmProjects\pythonProject\diplom_2\dataset\archive (1)"  # Укажите путь к папке с моделями
+        # Изменяем путь к директории с моделями
+        models_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'models')
+        
+        # Создаем директорию, если она не существует
+        os.makedirs(models_dir, exist_ok=True)
+        
         # Загрузка моделей из папок
         models = []
         for folder_name in os.listdir(models_dir):
