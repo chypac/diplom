@@ -1,38 +1,3 @@
-"""
-Анализатор сетевого трафика в реальном времени
-
-Этот модуль предоставляет функционал для анализа сетевого трафика в реальном времени
-с использованием предобученных моделей машинного обучения для обнаружения аномалий.
-
-Основные возможности:
-1. Мониторинг сетевого трафика на выбранном интерфейсе
-2. Динамическая загрузка и смена моделей во время работы
-3. Настраиваемый порог обнаружения аномалий
-4. Логирование результатов анализа
-
-Использование:
-    python live_traffic_analyzer.py [--interface INTERFACE] [--threshold THRESHOLD]
-
-Аргументы:
-    --interface: Имя сетевого интерфейса для мониторинга
-    --threshold: Порог определения аномалий (от 0 до 1)
-
-Горячие клавиши:
-    M: Смена модели во время работы
-
-Требования:
-    - networc_interface: модуль для работы с сетью и моделями
-    - psutil: для работы с системными интерфейсами
-    - keyboard: для обработки горячих клавиш
-    - logging: для ведения журнала
-    - threading: для асинхронной работы
-    - argparse: для обработки аргументов командной строки
-    - datetime: для работы с датой и временем
-
-Автор: [Агафонов Артём]
-Дата создания: 2024
-"""
-
 import os
 import logging
 import argparse
@@ -41,22 +6,21 @@ import psutil
 import keyboard
 import threading
 from time import sleep
-from datetime import datetime
 
 # Настройка логирования
-log_dir = 'logs'
-os.makedirs(log_dir, exist_ok=True)
-log_file = os.path.join(log_dir, f'analyzer_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
-
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(log_file, encoding='utf-8'),
+        logging.FileHandler('anomaly_detection.log'),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
+
+# Определение базовых путей относительно корня проекта
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MODELS_DIR = os.path.join(BASE_DIR, 'models')
 
 # Глобальные переменные для управления моделью
 current_model = None
@@ -64,12 +28,7 @@ model_info = None
 should_reload_model = threading.Event()
 
 def get_network_interfaces():
-    """
-    Получает список всех активных сетевых интерфейсов в системе.
-    
-    Returns:
-        list: Список имен активных сетевых интерфейсов.
-    """
+    """Получение списка доступных сетевых интерфейсов"""
     interfaces = []
     stats = psutil.net_if_stats()
     
@@ -79,151 +38,115 @@ def get_network_interfaces():
     return interfaces
 
 def get_available_models():
-    """
-    Сканирует директорию с моделями и возвращает список доступных моделей.
-    
-    Returns:
-        list: Список кортежей (имя_модели, путь_к_файлу_модели).
-    """
-    # Изменяем путь к моделям
-    base_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'models')
+    """Получение списка доступных моделей"""
     models = []
-    
-    # Проверяем существование директории
-    if not os.path.exists(base_path):
-        os.makedirs(base_path)
-        logger.warning(f"Создана директория для моделей: {base_path}")
-        return models
-    
-    # Проходим по всем папкам с моделями
-    for model_dir in os.listdir(base_path):
-        model_path = os.path.join(base_path, model_dir)
-        if os.path.isfile(model_path) and model_path.endswith('.pth'):
-            models.append((os.path.splitext(model_dir)[0], model_path))
-    
+    for file in os.listdir(MODELS_DIR):
+        if file.endswith('_model.pth'):
+            model_name = file[:-10]  # Убираем '_model.pth'
+            models.append(model_name)
     return models
 
 def select_model():
-    """
-    Предоставляет интерактивный интерфейс для выбора модели.
+    """Выбор модели для использования"""
+    global current_model, model_info
     
-    Returns:
-        str: Путь к выбранной модели.
-    
-    Raises:
-        ValueError: Если введен некорректный номер модели.
-    """
-    models = get_available_models()
-    
+    available_models = get_available_models()
+    if not available_models:
+        logger.error("Нет доступных моделей для анализа трафика")
+        return False
+        
     print("\nДоступные модели:")
-    print("-" * 50)
-    for i, (name, _) in enumerate(models, 1):
-        print(f"{i}. {name}")
-    
-    while True:
-        try:
-            choice = int(input("\nВыберите номер модели: ")) - 1
-            if 0 <= choice < len(models):
-                return models[choice][1]
-            print("Неверный номер. Попробуйте снова.")
-        except ValueError:
-            print("Пожалуйста, введите число.")
+    for i, model_name in enumerate(available_models, 1):
+        print(f"{i}. {model_name}")
+        
+    try:
+        choice = int(input("\nВыберите модель (номер): "))
+        if 1 <= choice <= len(available_models):
+            model_name = available_models[choice - 1]
+            model_path = os.path.join(MODELS_DIR, f"{model_name}_model.pth")
+            
+            logger.info(f"Загрузка модели: {model_name}")
+            model_info = load_model(model_path)  # Теперь это кортеж (model, scaler)
+            current_model = model_name
+            return True
+    except ValueError:
+        pass
+        
+    logger.error("Неверный выбор модели")
+    return False
 
 def model_switch_listener():
-    """
-    Запускает поток для отслеживания нажатия клавиши 'M' для смены модели.
-    Устанавливает флаг should_reload_model при нажатии клавиши.
-    """
+    """Поток для отслеживания нажатия клавиш"""
     global should_reload_model
     
-    def on_key_event(e):
-        if e.name == 'm':
-            logger.info("Запрошена смена модели...")
+    while True:
+        if keyboard.is_pressed('m'):
+            logger.info("Запрошена смена модели")
             should_reload_model.set()
-    
-    keyboard.on_press(on_key_event)
+            sleep(0.5)  # Предотвращение множественных нажатий
 
 def main():
-    """
-    Основная функция программы.
-    
-    Выполняет следующие действия:
-    1. Обработка аргументов командной строки
-    2. Проверка доступности сетевого интерфейса
-    3. Запуск потока отслеживания клавиш
-    4. Основной цикл работы программы:
-       - Загрузка модели
-       - Мониторинг трафика
-       - Обработка смены модели
-    """
-    global current_model, model_info, should_reload_model
-    
-    parser = argparse.ArgumentParser(description='Анализ реального трафика на аномалии с использованием предобученной модели')
-    parser.add_argument('--interface', type=str, 
-                       default='Беспроводная сеть 2',
-                       help='Сетевой интерфейс для мониторинга')
-    parser.add_argument('--threshold', type=float, default=0.1, 
-                       help='Порог для определения аномалий (по умолчанию: 0.1)')
+    """Основная функция"""
+    parser = argparse.ArgumentParser(description="Анализатор сетевого трафика")
+    parser.add_argument("--interface", type=str, help="Сетевой интерфейс для мониторинга")
     args = parser.parse_args()
-
-    # Получение списка доступных интерфейсов
-    available_interfaces = get_network_interfaces()
     
-    if not available_interfaces:
-        logger.error("Не найдено активных сетевых интерфейсов")
+    # Получаем список интерфейсов
+    interfaces = get_network_interfaces()
+    if not interfaces:
+        logger.error("Не найдены активные сетевые интерфейсы")
         return
-
-    if args.interface not in available_interfaces:
-        logger.error(f"Интерфейс {args.interface} не найден или неактивен")
-        logger.info("Доступные интерфейсы: " + ", ".join(available_interfaces))
+        
+    # Выбор интерфейса
+    interface = args.interface
+    if not interface:
+        print("\nДоступные сетевые интерфейсы:")
+        for i, iface in enumerate(interfaces, 1):
+            print(f"{i}. {iface}")
+            
+        try:
+            choice = int(input("\nВыберите интерфейс (номер): "))
+            if 1 <= choice <= len(interfaces):
+                interface = interfaces[choice - 1]
+            else:
+                logger.error("Неверный выбор интерфейса")
+                return
+        except ValueError:
+            logger.error("Неверный ввод")
+            return
+            
+    if interface not in interfaces:
+        logger.error(f"Интерфейс {interface} не найден или неактивен")
         return
-
-    # Запуск потока отслеживания клавиш
-    keyboard_thread = threading.Thread(target=model_switch_listener, daemon=True)
-    keyboard_thread.start()
-
+        
+    # Выбор начальной модели
+    if not select_model():
+        return
+        
+    # Запуск потока для отслеживания смены модели
+    threading.Thread(target=model_switch_listener, daemon=True).start()
+    
+    logger.info(f"Начало мониторинга трафика на интерфейсе: {interface}")
+    logger.info("Нажмите 'M' для смены модели или 'Ctrl+C' для выхода")
+    
     try:
         while True:
-            # Выбор модели
-            if current_model is None or should_reload_model.is_set():
-                model_path = select_model()
-                if not os.path.exists(model_path):
-                    logger.error(f"Файл модели не найден: {model_path}")
-                    return
-
-                # Загрузка модели
-                model_info = load_model(model_path)
-                if model_info is None:
-                    logger.error("Не удалось загрузить модель")
-                    return
-
-                model, scaler = model_info  # Распаковываем кортеж
-                current_model = model_path
+            if should_reload_model.is_set():
+                if select_model():
+                    logger.info(f"Модель успешно изменена на: {current_model}")
                 should_reload_model.clear()
-                logger.info(f"Модель успешно загружена из {model_path}")
-                logger.info(f"Для смены модели нажмите клавишу 'M'")
-
-            logger.info(f"Начинаем мониторинг трафика на интерфейсе {args.interface}")
-            logger.info(f"Порог определения аномалий: {args.threshold}")
-
-            # Запуск мониторинга с правильными аргументами
-            monitor_thread = threading.Thread(
-                target=monitor_traffic,
-                args=(args.interface, model, scaler),
-                daemon=True
-            )
-            monitor_thread.start()
-
-            # Ожидание запроса на смену модели
-            while not should_reload_model.is_set():
-                sleep(1)
-
-            logger.info("Перезагрузка модели...")
-
+                
+            if model_info:
+                model, scaler = model_info  # Распаковываем кортеж
+                monitor_traffic(interface, model, scaler)
+            else:
+                logger.error("Модель не загружена")
+                break
+                
     except KeyboardInterrupt:
-        logger.info("Мониторинг остановлен пользователем")
+        logger.info("\nЗавершение работы анализатора...")
     except Exception as e:
-        logger.error(f"Произошла ошибка: {str(e)}", exc_info=True)
+        logger.error(f"Ошибка при анализе трафика: {e}")
 
 if __name__ == "__main__":
     main()

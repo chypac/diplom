@@ -22,9 +22,8 @@ wheels/
 
 # Virtual Environment
 venv/
-.env/
-.venv/
 ENV/
+env/
 
 # IDE
 .idea/
@@ -33,20 +32,34 @@ ENV/
 *.swo
 
 # Logs
-*.log
 logs/
-anomaly_detection.log
+*.log
 
-# OS
+# Data
+data/
+dataset/
+
+# Models (если модели большие, их лучше хранить отдельно)
+!models/
+!models/*.pth
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local development settings
+.env
+.env.local
+
+# OS generated files
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
 Thumbs.db
-
-# Dataset files, but keep models
-dataset/*
-!dataset/*/autoencoder_model.pth
-!dataset/*/model_config.json
-
-# Large files
-*.csv
-*.pcap
-*.pcapng

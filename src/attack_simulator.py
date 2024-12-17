@@ -10,24 +10,8 @@ import threading
 import logging
 import os
 import re
-from datetime import datetime
 
 logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
-
-# Настройка логирования
-log_dir = 'logs'
-os.makedirs(log_dir, exist_ok=True)
-log_file = os.path.join(log_dir, f'simulator_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(log_file, encoding='utf-8'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
 
 class AttackSimulator:
     def __init__(self, target_ip, interface=None):

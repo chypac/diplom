@@ -1,34 +1,3 @@
-"""
-Система обнаружения сетевых атак
-
-Этот модуль реализует комплексную систему для тестирования обнаружения сетевых атак.
-Он объединяет анализатор трафика и симулятор атак для проверки эффективности
-обнаружения различных типов сетевых атак.
-
-Основные возможности:
-1. Автоматический запуск анализатора трафика
-2. Последовательная симуляция различных типов атак:
-   - SYN Flood
-   - UDP Flood
-   - ICMP Flood
-   - Port Scan
-3. Мониторинг и отображение результатов в реальном времени
-4. Цветной вывод для лучшей визуализации обнаруженных атак
-
-Требования:
-    - subprocess: для управления процессами
-    - threading: для асинхронной работы
-    - attack_simulator: для симуляции атак
-    - logging: для ведения журнала
-    - termcolor: для цветного вывода
-
-Использование:
-    python detection_system.py
-
-Автор: [Агафонов Артём]
-Дата создания: 2024
-"""
-
 import subprocess
 import time
 import sys
@@ -37,209 +6,179 @@ from attack_simulator import AttackSimulator
 import logging
 from termcolor import colored
 import os
-import datetime
+from networc_interface import load_model, preprocess_packet, classify_packet_detection
+from scapy.all import sniff
+import queue
+import numpy as np
+import torch
+import torch.nn as nn
 
-# Настройка логирования
-log_dir = 'logs'
-os.makedirs(log_dir, exist_ok=True)
-log_file = os.path.join(log_dir, f'detection_{datetime.datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(log_file, encoding='utf-8'),
-        logging.StreamHandler()
-    ]
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Определение базовых путей
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MODELS_DIR = os.path.join(BASE_DIR, 'models')
+
+# Словарь с описаниями типов атак и их параметрами
+ATTACK_TYPES = {
+    'syn_flood': {
+        'name': 'SYN Flood',
+        'duration': 30,
+        'intensity': 'high',
+        'description': 'SYN флуд атака для перегрузки сервера',
+        'model': 'syn_dos_model.pth'  # Используем существующую модель
+    },
+    'udp_flood': {
+        'name': 'UDP Flood',
+        'duration': 30,
+        'intensity': 'high',
+        'description': 'UDP флуд атака для перегрузки сети',
+        'model': 'ssdp_flood_model.pth'  # Используем похожую модель
+    },
+    'icmp_flood': {
+        'name': 'ICMP Flood',
+        'duration': 30,
+        'intensity': 'high',
+        'description': 'ICMP флуд атака (ping flood)',
+        'model': 'mirai_botnet_model.pth'  # Используем модель ботнета
+    },
+    'port_scan': {
+        'name': 'Port Scan',
+        'duration': 30,
+        'intensity': 'medium',
+        'description': 'Сканирование портов целевой системы',
+        'model': 'os_scan_model.pth'  # Используем модель сканирования
+    },
+    'arp_spoof': {
+        'name': 'ARP Spoofing',
+        'duration': 30,
+        'intensity': 'high',
+        'description': 'ARP-спуфинг атака для перехвата трафика',
+        'model': 'arp_mitm_model.pth'  # Используем модель ARP MitM
+    }
+}
+
 class DetectionSystem:
-    """
-    Основной класс системы обнаружения сетевых атак.
-    
-    Управляет процессом анализа трафика и симуляцией атак, координируя
-    работу анализатора трафика и симулятора атак.
-    
-    Attributes:
-        analyzer_process: Процесс анализатора трафика
-        attack_thread: Поток для выполнения атак
-        stop_flag: Флаг для остановки работы системы
-    """
-    
     def __init__(self):
-        """Инициализация системы обнаружения."""
-        self.analyzer_process = None
-        self.attack_thread = None
         self.stop_flag = False
-
-    def start_analyzer(self):
-        """
-        Запускает процесс анализатора трафика.
+        self.current_attack = None
+        self.packet_queue = queue.Queue()
+        self.detector_thread = None
+        self.current_model = None
+        self.current_scaler = None
         
-        Настраивает и запускает анализатор трафика в отдельном процессе,
-        устанавливает потоки для мониторинга вывода и ошибок.
-        
-        Raises:
-            Exception: При ошибке запуска анализатора
-        """
+    def load_attack_model(self, attack_type):
+        """Загрузка модели для определенного типа атаки"""
         try:
-            logger.info("Запуск анализатора трафика...")
-            # Добавляем параметр creationflags для Windows
-            startupinfo = None
-            if sys.platform == 'win32':
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            
-            self.analyzer_process = subprocess.Popen(
-                [sys.executable, "live_traffic_analyzer.py"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-                universal_newlines=True,
-                encoding='utf-8',
-                startupinfo=startupinfo
-            )
-            
-            time.sleep(10)  # Время на инициализацию
-            logger.info("Анализатор трафика запущен")
-            
-            # Запуск потоков мониторинга
-            threading.Thread(target=self.monitor_analyzer_output, args=(self.analyzer_process,), daemon=True).start()
-            threading.Thread(target=self.monitor_analyzer_errors, args=(self.analyzer_process,), daemon=True).start()
-            
+            model_path = os.path.join(MODELS_DIR, ATTACK_TYPES[attack_type]['model'])
+            if os.path.exists(model_path):
+                logger.info(f"Загрузка модели для атаки {ATTACK_TYPES[attack_type]['name']}...")
+                model, scaler = load_model(model_path)
+                self.current_model = model
+                self.current_scaler = scaler
+                return True
+            else:
+                logger.warning(f"Модель для атаки {attack_type} не найдена")
+                return False
         except Exception as e:
-            logger.error(f"Ошибка запуска анализатора: {e}")
-            sys.exit(1)
-
-    def monitor_analyzer_output(self, process):
-        """
-        Мониторит и форматирует вывод анализатора трафика.
-        
-        Args:
-            process: Процесс анализатора для мониторинга
+            logger.error(f"Ошибка загрузки модели: {e}")
+            return False
             
-        Особенности:
-            - Форматирует вывод с использованием цветов
-            - Специальная обработка для обнаруженных атак
-            - Группировка связанной информации
-        """
-        while True:
-            line = process.stdout.readline()
-            if not line:
-                break
-            line = line.decode('utf-8', errors='replace').strip()
-            if line:
-                if line.startswith('[Анализатор]'):
-                    logger.info(f"[Анализатор] {line[12:]}")
-                elif '[!]' in line:  # Особая обработка для обнаруженных атак
-                    print('\n' + '='*70)
-                    print(colored(line, 'red', attrs=['bold']))
-                    # Читаем следующие строки с деталями атаки
-                    for _ in range(8):  # Примерное количество строк с деталями
-                        detail_line = process.stdout.readline().decode('utf-8', errors='replace').strip()
-                        if detail_line:
-                            if 'Тип атаки:' in detail_line:
-                                print(colored(detail_line, 'yellow', attrs=['bold']))
-                            elif 'Уверенность:' in detail_line:
-                                print(colored(detail_line, 'green', attrs=['bold']))
-                            else:
-                                print(detail_line)
-                    print('='*70 + '\n')
-                else:
-                    logger.info(f"[Анализатор INFO] {line}")
-
-    def monitor_analyzer_errors(self, process):
-        """
-        Мониторит и обрабатывает ошибки анализатора.
+    def packet_callback(self, packet):
+        """Callback для обработки перехваченных пакетов"""
+        self.packet_queue.put(packet)
         
-        Args:
-            process: Процесс анализатора для мониторинга
-            
-        Особенности:
-            - Отдельная обработка сообщений о CUDA
-            - Форматирование сообщений об ошибках
-        """
-        while True:
-            line = process.stderr.readline()
-            if not line:
-                break
-            line = line.decode('utf-8', errors='replace').strip()
-            if line:
-                if "cuda" in line.lower() or "device" in line.lower():
-                    logger.info(f"[Анализатор INFO] {line}")
-                else:
-                    logger.error(f"[Анализатор ERROR] {line}")
-
-    def start_attack(self, attack_type, duration=10, intensity='medium'):
-        """
-        Запускает симуляцию выбранной атаки.
-        
-        Args:
-            attack_type (str): Тип атаки для симуляции
-            duration (int): Продолжительность атаки в секундах
-            intensity (str): Интенсивность атаки ('low', 'medium', 'high')
-            
-        Raises:
-            Exception: При ошибке запуска атаки
-        """
+    def analyze_packets(self):
+        """Анализ пакетов на наличие аномалий"""
+        while not self.stop_flag:
+            try:
+                packet = self.packet_queue.get(timeout=1)
+                if self.current_model and self.current_scaler:
+                    features = preprocess_packet(packet)
+                    if features is not None:
+                        is_anomaly = classify_packet_detection(features, self.current_model, self.current_scaler)
+                        if is_anomaly:
+                            logger.warning(colored(f"[!] Обнаружен аномальный пакет:", 'red'))
+                            logger.warning(colored(f"    Тип атаки: {ATTACK_TYPES[self.current_attack]['name']}", 'yellow'))
+                            logger.warning(colored(f"    Детали пакета: {packet.summary()}", 'yellow'))
+                            
+            except queue.Empty:
+                continue
+            except Exception as e:
+                logger.error(f"Ошибка при анализе пакета: {e}")
+                
+    def start_attack(self, attack_type, duration=30, intensity='high'):
+        """Запуск симулированной атаки"""
         try:
-            logger.info(f"Начало {attack_type} атаки...")
-            simulator = AttackSimulator("127.0.0.1")  # Используем localhost
-            self.attack_thread = simulator.start_attack(attack_type, duration, intensity)
+            if attack_type not in ATTACK_TYPES:
+                logger.error(f"Неизвестный тип атаки: {attack_type}")
+                return
+                
+            attack_info = ATTACK_TYPES[attack_type]
+            logger.info(f"\n=== Симуляция атаки {attack_info['name']} ===")
+            logger.info(f"Описание: {attack_info['description']}")
+            logger.info(f"Интенсивность: {intensity}")
+            logger.info(f"Продолжительность: {duration}с")
+            
+            # Загружаем модель для обнаружения атаки
+            if self.load_attack_model(attack_type):
+                # Запускаем поток анализа пакетов
+                self.current_attack = attack_type
+                self.detector_thread = threading.Thread(target=self.analyze_packets)
+                self.detector_thread.start()
+                
+                # Запускаем сниффер пакетов
+                sniffer_thread = threading.Thread(
+                    target=lambda: sniff(
+                        prn=self.packet_callback,
+                        store=0,
+                        timeout=duration
+                    ),
+                    daemon=True
+                )
+                sniffer_thread.start()
+                
+                # Запускаем атаку
+                simulator = AttackSimulator("127.0.0.1")
+                if attack_type in simulator.supported_attacks:
+                    attack_func = simulator.supported_attacks[attack_type]
+                    attack_func(duration=duration, intensity=intensity)
+                    logger.info(f"Пауза между атаками...")
+                else:
+                    logger.error(f"Неподдерживаемый тип атаки. Поддерживаемые типы: {list(simulator.supported_attacks.keys())}")
+                
+                # Ждем завершения снифферa
+                sniffer_thread.join()
+                
+            else:
+                logger.error(f"Не удалось загрузить модель для атаки {attack_type}")
             
         except Exception as e:
             logger.error(f"Ошибка запуска атаки: {e}")
+        finally:
+            self.current_attack = None
+            self.current_model = None
+            self.current_scaler = None
 
-    def run_detection(self):
-        """
-        Запускает полный цикл тестирования системы обнаружения.
-        
-        Последовательность действий:
-        1. Запуск анализатора трафика
-        2. Последовательная симуляция различных атак
-        3. Мониторинг результатов
-        4. Корректное завершение работы
-        
-        Особенности:
-        - Увеличенная длительность и интенсивность атак для localhost
-        - Паузы между атаками для лучшего анализа
-        - Корректная обработка прерывания работы
-        """
+    def run_detection(self, selected_attacks=None):
+        """Запуск системы обнаружения атак"""
         try:
-            # Запускаем анализатор
-            self.start_analyzer()
-            
-            # Ждем полной инициализации
-            logger.info("Ожидание инициализации анализатора...")
-            time.sleep(15)
-            
-            # Последовательно запускаем разные типы атак
-            attack_scenarios = [
-                ("syn_flood", 30, "high"),
-                ("udp_flood", 30, "high"),
-                ("icmp_flood", 30, "high"),
-                ("port_scan", 30, "high")
-            ]
-            
-            for attack_type, duration, intensity in attack_scenarios:
-                logger.info(f"\n=== Симуляция {attack_type} атаки ===")
-                logger.info(f"Интенсивность: {intensity}, Продолжительность: {duration}с")
+            if selected_attacks is None:
+                selected_attacks = list(ATTACK_TYPES.keys())
                 
-                self.start_attack(attack_type, duration, intensity)
-                
-                if self.attack_thread:
-                    self.attack_thread.join()
-                
-                logger.info("Пауза между атаками...")
-                time.sleep(10)
-            
+            for attack_type in selected_attacks:
+                if self.stop_flag:
+                    break
+                    
+                if attack_type in ATTACK_TYPES:
+                    self.start_attack(attack_type)
+                    if not self.stop_flag:
+                        time.sleep(5)  # Пауза между атаками
+                else:
+                    logger.error(f"Неизвестный тип атаки: {attack_type}")
+                    
             logger.info("\nСимуляция завершена")
-            
-            logger.info("Нажмите Ctrl+C для завершения...")
-            while True:
-                time.sleep(1)
             
         except KeyboardInterrupt:
             logger.info("\nПрерывание работы...")
@@ -247,39 +186,49 @@ class DetectionSystem:
             self.cleanup()
 
     def cleanup(self):
-        """
-        Выполняет корректное завершение работы системы.
-        
-        Особенности:
-        - Установка флага остановки
-        - Корректное завершение процесса анализатора
-        - Обработка таймаута при завершении
-        """
+        """Очистка ресурсов"""
         self.stop_flag = True
-        if self.analyzer_process:
-            logger.info("Завершение работы анализатора...")
-            self.analyzer_process.terminate()
-            try:
-                self.analyzer_process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.analyzer_process.kill()
+        if self.current_attack:
+            logger.info(f"Остановка текущей атаки: {self.current_attack}")
+            self.current_attack = None
+        if self.detector_thread and self.detector_thread.is_alive():
+            self.detector_thread.join()
 
 def main():
-    """
-    Точка входа в программу.
+    """Основная функция"""
+    detection_system = DetectionSystem()
     
-    Выводит приветственное сообщение и запускает систему обнаружения.
-    """
     print("\n=== Система обнаружения сетевых атак ===")
-    print("1. Будет запущен анализатор трафика")
-    print("2. Последовательно будут выполнены различные типы атак")
-    print("3. Результаты анализа будут выводиться в реальном времени")
-    print("\nНажмите Enter для начала работы или Ctrl+C для выхода")
+    print("Доступные типы атак:")
+    for attack_id, attack_info in ATTACK_TYPES.items():
+        print(f"- {attack_info['name']}: {attack_info['description']}")
     
-    input()
-    
-    system = DetectionSystem()
-    system.run_detection()
+    while True:
+        print("\nВыберите действие:")
+        print("1. Запустить все доступные атаки")
+        print("2. Выбрать конкретные атаки")
+        print("3. Выход")
+        
+        choice = input("\nВаш выбор (1-3): ")
+        
+        if choice == "1":
+            detection_system.run_detection()
+        elif choice == "2":
+            print("\nДоступные атаки:")
+            for i, (attack_id, attack_info) in enumerate(ATTACK_TYPES.items(), 1):
+                print(f"{i}. {attack_info['name']}")
+            
+            try:
+                selected_nums = input("\nВведите номера атак через пробел: ").split()
+                selected_attacks = [list(ATTACK_TYPES.keys())[int(num) - 1] for num in selected_nums]
+                detection_system.run_detection(selected_attacks)
+            except (ValueError, IndexError):
+                print("Ошибка: введите корректные номера атак")
+        elif choice == "3":
+            print("Выход из программы")
+            break
+        else:
+            print("Неверный выбор. Попробуйте снова.")
 
 if __name__ == "__main__":
     main()

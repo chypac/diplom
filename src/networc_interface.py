@@ -261,40 +261,72 @@ def preprocess_packet(packet):
         return None
 
 # Функция классификации пакетов
-def classify_packet(packet, model, scaler):
+def classify_packet(features, model, scaler):
+    """
+    Классифицирует пакет как нормальный или аномальный
+    
+    Args:
+        features (dict): Словарь признаков пакета
+        model (torch.nn.Module): Модель для классификации
+        scaler (sklearn.preprocessing.StandardScaler): Нормализатор данных
+        
+    Returns:
+        bool: True если пакет аномальный, False если нормальный
+    """
+    try:
+        # Преобразуем признаки в numpy массив
+        features_array = np.array(list(features.values())).reshape(1, -1)
+        # Нормализуем данные
+        features_normalized = scaler.transform(features_array)
+        # Конвертируем в тензор
+        device = next(model.parameters()).device
+        features_tensor = torch.FloatTensor(features_normalized).to(device)
+        
+        # Создаем "нормальный" образец
+        normal_sample = torch.zeros_like(features_tensor)
+        
+        # Вычисляем отклонение
+        criterion = nn.L1Loss(reduction='mean')
+        with torch.no_grad():
+            output = model(features_tensor)
+            loss = criterion(output, normal_sample)
+            loss_value = float(loss.item())
+            
+            # Определяем аномалию
+            threshold = 0.1
+            return loss_value > threshold
+            
+    except Exception as e:
+        logger.error(f"Ошибка при классификации пакета: {e}")
+        return False
+
+def classify_packet_live(packet, model, scaler):
+    """
+    Классифицирует пакет для live_traffic_analyzer.py
+    Возвращает тип атаки и значение отклонения
+    """
     try:
         features = preprocess_packet(packet)
         if features is None:
             return None, None
 
-        # Преобразуем в numpy массив и ограничиваем значения
+        # features уже numpy массив, просто меняем форму
         features_array = np.array(features).reshape(1, -1)
-        features_array = np.clip(features_array, -1e6, 1e6)  # Ограничиваем до разумных пределов
+        features_array = np.clip(features_array, -1e6, 1e6)
         
-        # Нормализуем данные
         features_normalized = scaler.transform(features_array)
+        features_tensor = torch.FloatTensor(features_normalized).to(next(model.parameters()).device)
         
-        # Конвертируем в тензор и перемещаем на нужное устройство
-        device = next(model.parameters()).device  # Получаем устройство модели
-        features_tensor = torch.FloatTensor(features_normalized).to(device)
-        
-        # Создаем "нормальный" образец на том же устройстве
         normal_sample = torch.zeros_like(features_tensor)
-        
-        # Используем L1Loss для вычисления отклонения
         criterion = nn.L1Loss(reduction='mean')
         
         with torch.no_grad():
             output = model(features_tensor)
             loss = criterion(output, normal_sample)
-            
-            # Нормализуем loss более мягко
             loss_value = float(loss.item())
-            loss_value = np.clip(loss_value, 0, 10) / 10  # Делим на 10 для получения значений от 0 до 1
+            loss_value = np.clip(loss_value, 0, 10) / 10
             
-            # Определяем порог для аномалий
-            threshold = 0.1
-            if loss_value > threshold:
+            if loss_value > 0.1:
                 logging.warning(f"Аномалия обнаружена! Потеря: {loss_value:.4f}")
             else:
                 logging.info(f"Нормальный трафик. Потеря: {loss_value:.4f}")
@@ -305,73 +337,110 @@ def classify_packet(packet, model, scaler):
         logging.error(f"Ошибка при классификации пакета: {str(e)}")
         return None, None
 
+def classify_packet_detection(features, model, scaler):
+    """
+    Классифицирует пакет для detection_system.py
+    Возвращает True если пакет аномальный, False если нормальный
+    """
+    try:
+        # features уже numpy массив, просто меняем форму
+        features_array = np.array(features).reshape(1, -1)
+        features_normalized = scaler.transform(features_array)
+        device = next(model.parameters()).device
+        features_tensor = torch.FloatTensor(features_normalized).to(device)
+        
+        normal_sample = torch.zeros_like(features_tensor)
+        criterion = nn.L1Loss(reduction='mean')
+        
+        with torch.no_grad():
+            output = model(features_tensor)
+            loss = criterion(output, normal_sample)
+            loss_value = float(loss.item())
+            
+            threshold = 0.1
+            return loss_value > threshold
+            
+    except Exception as e:
+        logger.error(f"Ошибка при классификации пакета: {e}")
+        return False
+
+def format_packet_info(packet):
+    """
+    Форматирует информацию о пакете в читаемый вид
+    
+    Args:
+        packet: Пакет scapy
+        
+    Returns:
+        str: Отформатированная строка с информацией о пакете
+    """
+    try:
+        if packet.haslayer('IP'):
+            info = f"IP {packet[IP].src:15} -> {packet[IP].dst:15}"
+            if packet.haslayer('TCP'):
+                info += f" TCP {packet[TCP].sport:5} -> {packet[TCP].dport:5}"
+            elif packet.haslayer('UDP'):
+                info += f" UDP {packet[UDP].sport:5} -> {packet[UDP].dport:5}"
+            return info
+        return None
+    except Exception as e:
+        logger.error(f"Ошибка при форматировании информации о пакете: {e}")
+        return None
+
 # Реальный мониторинг трафика
 def monitor_traffic(interface, model, scaler):
-    if not isinstance(model, nn.Module):
-        logger.error("Некорректный формат модели")
-        return
-        
+    """
+    Мониторит сетевой трафик на указанном интерфейсе
+    
+    Args:
+        interface (str): Имя сетевого интерфейса
+        model (torch.nn.Module): Модель для классификации
+        scaler (sklearn.preprocessing.StandardScaler): Нормализатор данных
+    """
     # Статистика
     stats = {
         'total_packets': 0,
-        'normal_packets': 0,
         'anomaly_packets': 0,
-        'min_loss': float('inf'),
-        'max_loss': float('-inf'),
-        'avg_loss': 0,
-        'start_time': time.time(),
-        'last_print_time': time.time()  # Время последнего вывода
+        'last_loss': 0.0,
+        'start_time': time.time()
     }
     
-    def update_stats(loss_value, is_anomaly):
+    def update_stats(loss, is_anomaly):
         stats['total_packets'] += 1
         if is_anomaly:
             stats['anomaly_packets'] += 1
-        else:
-            stats['normal_packets'] += 1
+        stats['last_loss'] = loss
+        
+        # Каждые 100 пакетов выводим статистику
+        if stats['total_packets'] % 100 == 0:
+            elapsed_time = time.time() - stats['start_time']
+            packets_per_second = stats['total_packets'] / elapsed_time if elapsed_time > 0 else 0
+            anomaly_ratio = (stats['anomaly_packets'] / stats['total_packets']) * 100
             
-        stats['min_loss'] = min(stats['min_loss'], loss_value)
-        stats['max_loss'] = max(stats['max_loss'], loss_value)
-        stats['avg_loss'] = (stats['avg_loss'] * (stats['total_packets'] - 1) + loss_value) / stats['total_packets']
-        
-        current_time = time.time()
-        # Выводим статистику каждые 5 секунд
-        if current_time - stats['last_print_time'] >= 5:
-            elapsed_time = current_time - stats['start_time']
-            packets_per_second = stats['total_packets'] / elapsed_time
-            logger.info("\n=== Статистика анализа трафика ===")
-            logger.info(f"Всего пакетов: {stats['total_packets']} | "
-                       f"Норма: {stats['normal_packets']} ({stats['normal_packets']/stats['total_packets']*100:.1f}%) | "
-                       f"Аномалии: {stats['anomaly_packets']} ({stats['anomaly_packets']/stats['total_packets']*100:.1f}%)")
-            logger.info(f"Отклонения: мин={stats['min_loss']:.4f}, макс={stats['max_loss']:.4f}, сред={stats['avg_loss']:.4f}")
-            logger.info(f"Скорость: {packets_per_second:.1f} пакетов/сек")
-            logger.info("================================\n")
-            stats['last_print_time'] = current_time
-        
+            logger.info(f"\n=== Статистика ===")
+            logger.info(f"Всего пакетов: {stats['total_packets']}")
+            logger.info(f"Аномальных пакетов: {stats['anomaly_packets']} ({anomaly_ratio:.2f}%)")
+            logger.info(f"Пакетов в секунду: {packets_per_second:.2f}")
+            logger.info(f"Последнее отклонение: {stats['last_loss']:.4f}")
+            logger.info("================\n")
+    
     def process_sniffed_packet(packet):
         try:
-            # Добавляем задержку 0.1 секунды между пакетами
-            time.sleep(0.1)
-            
-            # Компактный вывод информации о пакете
-            packet_info = f"{packet[IP].src:15} -> {packet[IP].dst:15}"
-            if TCP in packet:
-                packet_info += f" TCP {packet[TCP].sport:5} -> {packet[TCP].dport:5}"
-            elif UDP in packet:
-                packet_info += f" UDP {packet[UDP].sport:5} -> {packet[UDP].dport:5}"
-            logger.debug(f"Пакет: {packet_info}")
-            
-            result = classify_packet(packet, model, scaler)
-            if result is not None:
-                attack_type, loss = result
-                if loss is not None:
-                    is_anomaly = loss > 0.1  # порог для аномалий
-                    update_stats(loss, is_anomaly)
-                    
-                    if is_anomaly:
-                        logger.warning(f"[!] АНОМАЛИЯ {packet_info} | Отклонение: {loss:.4f}")
-                    else:
-                        logger.info(f"[+] НОРМА    {packet_info} | Отклонение: {loss:.4f}")
+            if packet.haslayer('IP'):
+                packet_info = format_packet_info(packet)
+                logger.debug(f"Пакет: {packet_info}")
+                
+                result = classify_packet_live(packet, model, scaler)
+                if result is not None:
+                    attack_type, loss = result
+                    if loss is not None:
+                        is_anomaly = loss > 0.1
+                        update_stats(loss, is_anomaly)
+                        
+                        if is_anomaly:
+                            logger.warning(f"[!] АНОМАЛИЯ {packet_info} | Отклонение: {loss:.4f}")
+                        else:
+                            logger.info(f"[+] НОРМА    {packet_info} | Отклонение: {loss:.4f}")
                     
         except Exception as e:
             logger.error(f'Ошибка при обработке пакета: {str(e)}')
@@ -406,12 +475,8 @@ if __name__ == "__main__":
             except ValueError:
                 logger.error("Введите числовое значение.")
 
-        # Изменяем путь к директории с моделями
-        models_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'models')
-        
-        # Создаем директорию, если она не существует
-        os.makedirs(models_dir, exist_ok=True)
-        
+        # Загрузка моделей из папок
+        models_dir = r"C:\Users\agaar\PycharmProjects\pythonProject\diplom_2\dataset\archive (1)"  # Укажите путь к папке с моделями
         # Загрузка моделей из папок
         models = []
         for folder_name in os.listdir(models_dir):
